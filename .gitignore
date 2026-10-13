@@ -1,3 +1,9 @@
 node_modules/
 tokens/
 *.log
+
+# Dados sensiveis
+.env
+
+# Versoes antigas locais (contem chaves antigas)
+vers*/

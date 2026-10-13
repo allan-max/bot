@@ -9,10 +9,32 @@ const fs = require('fs');
 const util = require('util');
 const path = require('path');
 
-// ======================================================================
+// VARIAVEIS DE AMBIENTE (.env)
+// Dados sensiveis (chaves de API, IPs, senhas, caminhos de rede) ficam no arquivo .env,
+// que NAO vai para o GitHub. Use o arquivo .env.example como modelo.
+try {
+    process.loadEnvFile(path.join(__dirname, '.env'));
+} catch (e) {
+    // Sem arquivo .env: segue usando as variaveis ja definidas no sistema (se houver)
+}
+
+const VARIAVEIS_OBRIGATORIAS = [
+    'PASTA_DO_LOG',
+    'API_GATEWAY_URL',
+    'CALLBACK_HOST',
+    'GROQ_API_KEY',
+    'SENHA_ADMIN',
+    'NOME_GRUPO_CADASTRO',
+    'NOME_GRUPO_DATASHEET'
+];
+const variaveisFaltando = VARIAVEIS_OBRIGATORIAS.filter(nome => !process.env[nome]);
+if (variaveisFaltando.length > 0) {
+    console.error(`Configuracao incompleta. Defina no arquivo .env: ${variaveisFaltando.join(', ')}`);
+    process.exit(1);
+}
+
 // SISTEMA DE LOGS DEFINITIVO (CAPTURA 100% DO CMD)
-// ======================================================================
-const PASTA_DO_LOG = '\\\\SERVIDOR2\\Publico\\ALLAN\\Logs'; 
+const PASTA_DO_LOG = process.env.PASTA_DO_LOG;
 const arquivoLog = path.join(PASTA_DO_LOG, 'log_zapzap.txt');
 
 try {
@@ -25,6 +47,11 @@ try {
 
 const streamDeLog = fs.createWriteStream(arquivoLog, { flags: 'a' });
 
+streamDeLog.on('error', (erro) => {
+    // Usa o originalStderrWrite para evitar loop infinito com a interceptação de logs
+    originalStderrWrite(`\n[FALHA NO LOG] Não foi possível gravar no arquivo de rede: ${erro.message}\n`);
+});
+
 // Bibliotecas como o WPPConnect usam textos coloridos no CMD. 
 // Essa função limpa os códigos de cor para o Bloco de Notas não ficar cheio de símbolos estranhos (ex: [32m).
 function limparCoresTerminal(texto) {
@@ -33,7 +60,7 @@ function limparCoresTerminal(texto) {
 
 // 1. Intercepta a saída principal do Node (Captura WPPConnect, Axios, Express, etc)
 const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-process.stdout.write = function(chunk, encoding, callback) {
+process.stdout.write = function (chunk, encoding, callback) {
     if (streamDeLog.writable) {
         streamDeLog.write(limparCoresTerminal(chunk));
     }
@@ -43,7 +70,7 @@ process.stdout.write = function(chunk, encoding, callback) {
 
 // 2. Intercepta a saída de erros críticos
 const originalStderrWrite = process.stderr.write.bind(process.stderr);
-process.stderr.write = function(chunk, encoding, callback) {
+process.stderr.write = function (chunk, encoding, callback) {
     if (streamDeLog.writable) {
         streamDeLog.write(limparCoresTerminal(chunk));
     }
@@ -63,54 +90,69 @@ console.error = function (...args) {
     errorNativo(`[${dataHora}] ERRO:`, ...args);
 };
 
-// CONFIGURAÇÃO
-// ======================================================================
-const PORTA_SERVIDOR = 3000;
-const API_GATEWAY = 'http://localhost:5000/api/gateway/tarefa'; 
-const MEU_IP_CALLBACK = 'http://localhost'; 
+// CONFIGURAÇÃO (valores definidos no .env)
+const PORTA_SERVIDOR = parseInt(process.env.PORTA_SERVIDOR, 10) || 5000;
+const API_GATEWAY = process.env.API_GATEWAY_URL;
+const MEU_IP_CALLBACK = process.env.CALLBACK_HOST;
 
-const NOME_GRUPO_PERMITIDO = 'CADASTRO VENTURA';
-const NOME_GRUPO_DATASHEET = 'DATASHEET VENTURA';
+const NOME_GRUPO_PERMITIDO = process.env.NOME_GRUPO_CADASTRO.toUpperCase().trim();
+const NOME_GRUPO_DATASHEET = process.env.NOME_GRUPO_DATASHEET.toUpperCase().trim();
 
-// ======================================================================
+const SENHA_ADMIN = process.env.SENHA_ADMIN.toLowerCase().trim();
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+
 // MEMÓRIA
-// ======================================================================
-let tarefasEmAndamento = new Map(); 
+let tarefasEmAndamento = new Map();
+let lotesEmAndamento = new Map();
 let clienteWpp = null;
 let horaInicializacao = Date.now();
 let usuariosAutorizados = new Set();
 
-// ======================================================================
-// CLASSES (Módulos de Texto)
-// ======================================================================
 class ExtratorDatasheet {
     constructor() {
         this.sitesSuportados = {
             'MERCADO_LIVRE': { padroes: [/mercadolivre\.com\.br/, /mercadolivre\.com/, /ml\.com/] },
-            'MAGAZINE_LUIZA': { padroes: [/magazineluiza\.com\.br/, /magazinevoce\.com\.br/] },
+            'belmicro': { padroes: [/belmicro\.com\.br/] },
+            'oficinadosbits': { padroes: [/oficinadosbits\.com\.br/] },
             'AMAZON': { padroes: [/amazon\.com\.br/, /amzn\.to/] },
+            'tambasa': { padroes: [/tambasa\.com\.br/, /loja\.tambasa\.com/, /tambasa\.com/] },
             'FUJIOKA': { padroes: [/fujioka\.com\.br/, /fujiokadistribuidor\.com\.br/] },
             'FRIOPECAS': { padroes: [/friopecas\.com\.br/] },
             'agis': { padroes: [/vendas.agis\.com\.br/, /agis\.com\.br/] },
+            'bradyid': { padroes: [/bradyid\.com/] },
             'vonder': { padroes: [/vonder\.com\.br/] },
             'MAZER': { padroes: [/mazer\.com\.br/] },
+            'ACIMAQ': { padroes: [/acimaq\.com\.br/] },
+            'dufrio': { padroes: [/dufrio\.com\.br/] },
+            'climario': { padroes: [/climario\.com\.br/] },
+            'martinsfontes': { padroes: [/martinsfontespaulista\.com\.br/] },
             'SAMSUNG': { padroes: [/samsung\.com/] },
-            'compregolden': { padroes: [/compregolden\.com\.br/,/compregolden\.com/ ] },
+            'compregolden': { padroes: [/compregolden\.com\.br/, /compregolden\.com/] },
             'DUTRA': { padroes: [/dutramaquinas\.com\.br/] },
             'ROUTE66': { padroes: [/route66\.com\.br/] },
-            'KABUM' : { padroes: [/kabum\.com\.br/]},
-            'ATACADOSP': { padroes: [/atacadosaopaulo\.com\.br/,/ atacadosaopaulo\.com/ ]},
+            'KABUM': { padroes: [/kabum\.com\.br/] },
+            'ATACADOSP': { padroes: [/atacadosaopaulo\.com\.br/, / atacadosaopaulo\.com/] },
+            'eletrolux': { padroes: [/loja\.electrolux\.com\.br/, / electrolux\.com\.br/] },
+            'consul': { padroes: [/consul\.com\.br/] },
+            'travessa': { padroes: [/travessa\.com\.br/] },
             'MARTINS': { padroes: [/martinsatacado\.com\.br/] },
             'LOJADOMECANICO': { padroes: [/lojadomecanico\.com\.br/] },
-            'MAGALU': { padroes: [/magazineluiza\.com\.br/, /magalu\.com/] },
+            'marchesoni': {padroes: [/marchesoni\.com\.br/] },
+            'TERABYTE': { padroes: [/terabyteshop\.com\.br/] },
             'MAGALUEMPRESAS': { padroes: [/magaluempresas\.com\.br/] },
-            'intelbras': { padroes: [/intelbras\.com/] },
-            'BHPHOTOVIDEO': { padroes: [/bhphotovideo\.com/] },
-            'dell': { padroes: [/dell\.com\.br/, /dell\.com/] },
+            'LEROY_MERLIN': { padroes: [/leroymerlin\.com\.br/] },
+            'lenovo': { padroes: [/lenovo\.com/] },
+            'projetelas': { padroes: [/projetelas\.com\.br/] },
+            'xbz': { padroes: [/xbzbrindes\.com\.br/] },
             'kalunga': { padroes: [/kalunga\.com\.br/] },
+            'tsshara': { padroes: [/tsshara\.com\.br/] },
+            'brastemp': { padroes: [/brastemp\.com\.br/] },
+            'midea': { padroes: [/midea\.com\.br/] },
+            'elgin': { padroes: [/loja\.elgin\.com\.br/, /elgin\.com\.br/] },
             'pauta': { padroes: [/pauta\.com\.br/] },
-            'ingram': { padroes: [/ingrammicro\.com\.br/] },
-            'tambasa': { padroes: [/tambasa\.com\.br/, /loja\.tambasa\.com/] },
             'frigelar': { padroes: [/frigelar\.com\.br/] },
             'fastshop': { padroes: [/fastshop\.com\.br/, /site\.fastshop\.com/] },
             'ordeco': { padroes: [/oderco\.com\.br/] },
@@ -118,7 +160,21 @@ class ExtratorDatasheet {
             'kalunga': { padroes: [/kalunga\.com\.br/] },
             'dimensional': { padroes: [/dimensional\.com\.br/] },
             'hayamax': { padroes: [/hayamax\.com\.br/] },
-            'WEG': { padroes: [/weg\.net/] }
+            'cetro': { padroes: [/cetro\.com\.br/] },
+            'WEG': { padroes: [/weg\.net/] },
+            'PICHAU': { padroes: [/pichau\.com\.br/] },
+            'EPSON': { padroes: [/epson\.com\.br/] },
+            'ANHANGUERA': { padroes: [/anhangueraferramentas\.com\.br/] },
+            'intelbras': { padroes: [/intelbras\.com/] },
+            'casasbahia': { padroes: [/casasbahia\.com\.br/] },
+            'ingram': { padroes: [/ingrammicro\.com\.br/, /br.\ingrammicro\.com/] },
+            'dell': { padroes: [/dell\.com\.br/, /dell\.com/] },
+            'BHPHOTOVIDEO': { padroes: [/bhphotovideo\.com/] },
+            'creativecopias': { padroes: [/creativecopias\.com\.br/] },
+            'MADEIRA_MADEIRA': { padroes: [/madeiramadeira\.com\.br/] },
+            'MAGALU': { padroes: [/magazineluiza\.com\.br/, /magalu\.com/] },
+            'eaton': { padroes: [/eaton\.com/, /eaton\.com\.br/]},
+            'MAGAZINE_LUIZA': { padroes: [/magazineluiza\.com\.br/, /magazinevoce\.com\.br/] },
         };
     }
     analisarMensagem(texto) {
@@ -134,6 +190,11 @@ class ExtratorDatasheet {
         for (const [site, config] of Object.entries(this.sitesSuportados)) {
             if (config.padroes.some(p => p.test(url))) { resultado.site = site; resultado.suportado = true; break; }
         }
+        // Link de site nao cadastrado: tambem e aceito, identificado como GENERICO
+        if (!resultado.suportado) {
+            resultado.site = 'GENERICO';
+            resultado.suportado = true;
+        }
         return resultado;
     }
 }
@@ -144,29 +205,23 @@ class ValidadorDatasheet {
     }
 }
 
-let extrator, validadorProduto, extratorFornecedor, validadorFornecedor, gerenciadorContexto;
+let extratorFornecedor, validadorFornecedor, gerenciadorContexto;
 try {
-    const modProdutos = require('./extrator-produtos');
-    extrator = new modProdutos.ExtratorSimples();
-    validadorProduto = new modProdutos.ValidadorProduto();
     const modFornecedores = require('./extrator-fornecedores');
     extratorFornecedor = new modFornecedores.ExtratorFornecedor();
     validadorFornecedor = new modFornecedores.ValidadorFornecedor();
     const modContexto = require('./contexto');
     gerenciadorContexto = new modContexto.GerenciadorContextoSilencioso();
 } catch (e) {
-    extrator = { analisarMensagem: () => [] };
-    validadorProduto = { validarProduto: () => ({ aprovado: false }) };
     extratorFornecedor = { analisarMensagem: () => ({}) };
     validadorFornecedor = { validarFornecedor: () => ({ aprovado: false }) };
-    gerenciadorContexto = { getContexto: () => ({ getUltimoFornecedorPendente: () => null, adicionarProdutoPendente: () => {}, completarUltimoProdutoPendenteComPreco: () => {} }) };
+    gerenciadorContexto = { getContexto: () => null };
 }
 const extratorDatasheet = new ExtratorDatasheet();
 const validadorDatasheet = new ValidadorDatasheet();
 
-// ======================================================================
+
 // ENVIO PARA GATEWAY 
-// ======================================================================
 async function enviarParaGateway(dadosOriginais) {
     const customId = dadosOriginais.custom_id || uuidv4();
     const webhookUrl = `${MEU_IP_CALLBACK}:${PORTA_SERVIDOR}/api/datasheet/webhook`;
@@ -177,8 +232,8 @@ async function enviarParaGateway(dadosOriginais) {
         case 'PRODUTO':
             dadosPayload = {
                 ncm: dadosOriginais.ncm,
-                custo: parseFloat(dadosOriginais.preco), 
-                descricao: dadosOriginais.descricao, 
+                custo: parseFloat(dadosOriginais.preco),
+                descricao: dadosOriginais.descricao,
                 webhook_url: webhookUrl
             };
             break;
@@ -218,34 +273,35 @@ async function enviarParaGateway(dadosOriginais) {
     try {
         const resposta = await axios.post(API_GATEWAY, payloadFinal, configAxios);
         console.log(`✅ [GATEWAY] Status: ${resposta.status}`);
-        
+
         if (resposta.data) {
-             console.log(`📦 [DADOS INTERNOS]`, JSON.stringify(resposta.data, null, 2));
+            console.log(`📦 [DADOS INTERNOS]`, JSON.stringify(resposta.data, null, 2));
         }
 
         let resultadoImediato = null;
-        
+
         // Verifica se veio resposta imediata do C#
         if (resposta.data && resposta.data.respostaServico) {
             try {
                 const dadosServico = JSON.parse(resposta.data.respostaServico);
-                
-                // --- CORREÇÃO AQUI: ADICIONADOS codigoCliente E codigoFornecedor ---
-                resultadoImediato = dadosServico.codigoProduto || 
-                                    dadosServico.codigoCliente || 
-                                    dadosServico.codigoFornecedor || 
-                                    dadosServico.codigo || 
-                                    dadosServico.id || 
-                                    dadosServico.Id;
+
+                resultadoImediato = dadosServico.codigoProduto ||
+                    dadosServico.codigoCliente ||
+                    dadosServico.codigoFornecedor ||
+                    dadosServico.codigo ||
+                    dadosServico.id ||
+                    dadosServico.Id ||
+                    dadosServico.ids_internos || // CAPTURA O RETORNO DO DATASHEET
+                    dadosServico.success;        // GARANTIA DE SUCESSO GENÉRICO
             } catch (e) {
                 console.error("Erro ao ler JSON interno:", e);
             }
         }
 
-        return { 
-            sucesso: true, 
-            id: customId, 
-            resultadoImediato: resultadoImediato 
+        return {
+            sucesso: true,
+            id: customId,
+            resultadoImediato: resultadoImediato
         };
 
     } catch (error) {
@@ -253,10 +309,51 @@ async function enviarParaGateway(dadosOriginais) {
         return { sucesso: false, erro: error.message };
     }
 }
+// NOVA FUNÇÃO: Gere os retornos (Síncronos e Assíncronos) para não espamar o WhatsApp
+// Substitua a sua função processarRetornoItem inteira por esta:
+async function processarRetornoItem(idTarefa, codigoGerado) {
+    const tarefa = tarefasEmAndamento.get(idTarefa);
+    if (!tarefa) return;
 
-// ======================================================================
+    const { msgId, tipo, isGroup, grupo, usuario } = tarefa;
+    const destino = isGroup ? grupo : usuario;
+
+    // Se for PRODUTO, verifica se faz parte de um lote
+    if (tipo === 'produto') {
+        const lote = lotesEmAndamento.get(msgId);
+        if (lote) {
+            lote.respostas.push(String(codigoGerado));
+
+            // Checa se o lote completou
+            if (lote.respostas.length === lote.totalEsperado) {
+                const msgFinal = lote.respostas.join('\n');
+                try {
+                    await clienteWpp.reply(destino, msgFinal, msgId);
+                    console.log(`✅ [LOTE CONCLUÍDO] Respondido ${lote.respostas.length} códigos na mesma mensagem.`);
+                } catch (erroReply) {
+                    console.error(`❌ [FALHA NO REPLY LOTE] Tentando envio simples... Erro original: ${erroReply.message}`);
+                    await clienteWpp.sendText(destino, msgFinal); // Fallback de segurança
+                }
+                lotesEmAndamento.delete(msgId);
+            }
+            tarefasEmAndamento.delete(idTarefa);
+            return;
+        }
+    }
+
+    // Se não for lote (ou algo não for produto)
+    try {
+        await clienteWpp.sendText(destino, String(codigoGerado), {
+            quotedMsg: msgId
+        });
+    } catch (erroReply) {
+        console.error(`❌ [FALHA NO REPLY SOLTO] Tentando envio simples... Erro original: ${erroReply.message}`);
+        await clienteWpp.sendText(destino, String(codigoGerado)); // Fallback de segurança
+    }
+    tarefasEmAndamento.delete(idTarefa);
+}
+
 // WEBHOOK 
-// ======================================================================
 const app = express();
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
@@ -265,27 +362,21 @@ app.post('/api/datasheet/webhook', async (req, res) => {
     try {
         const body = req.body || {};
         const idInterno = body.codigoTarefa || body.request_id || body.custom_id || body.id_interno;
-        
+
         if (idInterno) {
             const tarefa = tarefasEmAndamento.get(idInterno);
             if (tarefa && clienteWpp) {
-                const { msgId, usuario, grupo, tipo } = tarefa;
-                const destino = grupo || usuario;
-                
-                let msgResposta = "";
+                let msgResposta = "feito";
 
-                if (tipo === 'datasheet') {
-                    msgResposta = "feito";
-                } else {
-                    // --- CORREÇÃO AQUI TAMBÉM: ADICIONADOS OS CAMPOS FALTANTES ---
-                    const codigo = body.codigoProduto || 
-                                   body.codigoCliente || 
-                                   body.codigoFornecedor || 
-                                   body.codigo || 
-                                   body.Codigo || 
-                                   body.id || 
-                                   body.resultado;
-                    
+                if (tarefa.tipo !== 'datasheet') {
+                    const codigo = body.codigoProduto ||
+                        body.codigoCliente ||
+                        body.codigoFornecedor ||
+                        body.codigo ||
+                        body.Codigo ||
+                        body.id ||
+                        body.resultado;
+
                     if (typeof codigo === 'object') {
                         msgResposta = body.mensagem || "Feito";
                     } else {
@@ -293,10 +384,8 @@ app.post('/api/datasheet/webhook', async (req, res) => {
                     }
                 }
 
-                await clienteWpp.reply(destino, msgResposta, msgId);
-                console.log(`✅ Respondido via Webhook: "${msgResposta}"`);
-                
-                tarefasEmAndamento.delete(idInterno);
+                // Passa a bola para o sistema de lotes organizar
+                await processarRetornoItem(idInterno, msgResposta);
             }
         }
         res.json({ status: 'ok' });
@@ -306,13 +395,12 @@ app.post('/api/datasheet/webhook', async (req, res) => {
 });
 app.listen(PORTA_SERVIDOR, () => console.log(`🚀 Webhook na porta ${PORTA_SERVIDOR}`));
 
-// ======================================================================
+
 // BOT WHATSAPP
-// ======================================================================
 wppconnect.create({
     session: 'bot-servidor',
-    // 🔥 CAMINHO EXATO PARA O SEU CHROME 109
-    executablePath: 'C:\\Chrome109\\chrome-win\\chrome.exe', 
+    // CAMINHO DO CHROME (definido no .env)
+    executablePath: process.env.CHROME_PATH,
     headless: 'new',
     autoClose: 0,
     browserArgs: [
@@ -323,7 +411,7 @@ wppconnect.create({
         '--disable-gpu',
         '--no-first-run',
         '--no-zygote',
-        '--single-process', // 🔥 Essencial para não crashar no Win 2012
+        //'--single-process', // Essencial para não crashar no Win 2012
         '--disable-software-rasterizer',
         // User Agent do Chrome 109 para evitar bloqueios
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
@@ -337,52 +425,47 @@ wppconnect.create({
 async function start(client) {
     console.log('🤖 BOT ONLINE - MODO DEBUG TOTAL (SEM FILTROS)');
 
-    // ======================================================================
-    // 🔥 ESCUDO DEFINITIVO V2 (RECURSIVO) ANTI-[object Object]
-    // ======================================================================
+    // ESCUDO DEFINITIVO V2 (RECURSIVO) ANTI-[object Object]
     const extrairSeguro = (obj) => {
         // 1. Se for nulo ou vazio, ignora
-        if (!obj) return null;
-        
+        if (!obj) return '';
+
         // 2. Se já for o texto certinho, retorna (e ignora se for a string literal "[object Object]")
         if (typeof obj === 'string') {
             return obj === '[object Object]' ? null : obj;
         }
-        
+
         // 3. Se for um objeto, vamos cavar até achar a string
         if (typeof obj === 'object') {
             if (obj._serialized && typeof obj._serialized === 'string') {
                 return obj._serialized;
             }
-            
+
             // Aqui está o pulo do gato: se o .id for OUTRO objeto, a função chama ela mesma de novo!
             if (obj.id) {
-                return extrairSeguro(obj.id); 
+                return extrairSeguro(obj.id);
             }
         }
-        
+
         return String(obj);
     };
 
     // Blinda a função de Responder (Reply)
     const originalReply = client.reply.bind(client);
-    client.reply = async function(to, content, quotedMsg) {
+    client.reply = async function (to, content, quotedMsg) {
         return originalReply(extrairSeguro(to), content, extrairSeguro(quotedMsg));
     };
 
     // Blinda a função de Reagir com Emoji
     const originalReact = client.sendReactionToMessage.bind(client);
-    client.sendReactionToMessage = async function(messageId, reaction) {
+    client.sendReactionToMessage = async function (messageId, reaction) {
         return originalReact(extrairSeguro(messageId), reaction);
     };
-    // ======================================================================
 
     client.onMessage(async (message) => {
         if (message.type !== 'chat') return;
 
-        // ======================================================================
-        // 🔥 EXTRAÇÃO SEGURA DEFINITIVA (Lê a mensagem corretamente)
-        // ======================================================================
+        // EXTRAÇÃO SEGURA DEFINITIVA (Lê a mensagem corretamente)
         const extrairIdString = (obj) => {
             if (!obj) return null;
             if (typeof obj === 'string') return obj === '[object Object]' ? null : obj;
@@ -399,17 +482,32 @@ async function start(client) {
         const stringAuthor = extrairIdString(message.author);
 
         // Verifica se é grupo olhando para as variáveis seguras
-        const isGroup = message.isGroupMsg || 
-                        (stringChatId && stringChatId.includes('@g.us')) || 
-                        (stringFrom && stringFrom.includes('@g.us'));
-        
+        const isGroup = message.isGroupMsg ||
+            (stringChatId && stringChatId.includes('@g.us')) ||
+            (stringFrom && stringFrom.includes('@g.us'));
+
         // Se for grupo, pega o ID do grupo (sempre em texto). Se não, null.
         const grupo = isGroup ? (stringFrom && stringFrom.includes('@g.us') ? stringFrom : stringChatId) : null;
-        
+
         // O autor da mensagem (quem enviou)
         const usuario = stringAuthor || stringFrom;
-        
-        const msgId = extrairIdString(message.id);
+
+        // Busca o ID em todas as estruturas conhecidas do WPPConnect
+        let msgId = '';
+        if (message.id) {
+            if (typeof message.id === 'string') {
+                msgId = message.id;
+            } else if (typeof message.id === 'object') {
+                msgId = message.id._serialized || message.id.id || '';
+            }
+        }
+
+        // Se o ID estiver escondido nos dados brutos da mensagem (comum após atualizações do WhatsApp)
+        if (!msgId && message._data && message._data.id) {
+            msgId = typeof message._data.id === 'string' ? message._data.id : (message._data.id._serialized || '');
+        }
+
+        console.log(`[DEBUG ID] ID rastreado: "${msgId}"`);
 
         const texto = (message.body || '').trim();
 
@@ -421,34 +519,33 @@ async function start(client) {
         console.log(`   Grupo: ${isGroup ? 'SIM (' + grupo + ')' : 'NÃO'}`);
         console.log(`   Texto: "${texto}"`);
         console.log('===========================================================');
-        // ============================================================
+
         // 1. BLOCO DE GRUPOS
-        // ============================================================
         if (isGroup) {
             try {
                 // Tenta pegar o nome do chat
                 const chat = await client.getChatById(grupo);
-                
+
                 // Pega o nome do objeto chat OU do objeto message
-                const nomeReal = chat.name || message.chat.name || ''; 
+                const nomeReal = chat.name || message.chat.name || '';
                 const nomeG = nomeReal.toUpperCase().trim();
-                
+
                 console.log(`🔍 [ANALISANDO GRUPO]`);
                 console.log(`   Nome lido do WhatsApp: "${nomeReal}"`);
                 console.log(`   Nome usado na comparação: "${nomeG}"`);
                 console.log(`   Deve conter: "${NOME_GRUPO_PERMITIDO}" ou "${NOME_GRUPO_DATASHEET}"`);
 
                 // A. GRUPO DATASHEET
-                if (nomeG.includes(NOME_GRUPO_DATASHEET)) { 
+                if (nomeG.includes(NOME_GRUPO_DATASHEET)) {
                     console.log('   ✅ GRUPO DATASHEET DETECTADO! Processando...');
-                    await processarDatasheet(texto, usuario, grupo, isGroup, msgId); 
-                    return; 
+                    await processarDatasheet(texto, usuario, grupo, isGroup, msgId);
+                    return;
                 }
 
                 // B. GRUPO CADASTRO
                 if (nomeG.includes(NOME_GRUPO_PERMITIDO)) {
                     console.log('   ✅ GRUPO CADASTRO DETECTADO! Analisando conteúdo...');
-                    
+
                     const contexto = gerenciadorContexto.getContexto(grupo);
 
                     if (deveProcessarComoEntidade(texto)) {
@@ -457,36 +554,35 @@ async function start(client) {
                         return;
                     }
 
-                    if (deveProcessarComoDatasheet(texto)) { 
+                    if (deveProcessarComoDatasheet(texto)) {
                         console.log('   -> Identificado como Link Datasheet');
-                        await processarDatasheet(texto, usuario, grupo, isGroup, msgId); 
-                        return; 
+                        await processarDatasheet(texto, usuario, grupo, isGroup, msgId);
+                        return;
                     }
 
                     console.log('   -> Tentando processar como Produto...');
                     await processarProdutos(texto, usuario, grupo, isGroup, msgId, contexto);
-                    return; 
+                    return;
                 }
-                
+
                 console.log('   ⚠️ O nome do grupo não corresponde aos permitidos.');
 
             } catch (erro) {
                 console.error('❌ Erro ao ler dados do grupo:', erro);
             }
             return;
-        } 
-        
-      // ============================================================
+        }
+
         // 2. BLOCO DE PV (MANTIDO E CORRIGIDO)
-        // ============================================================
+
         else {
             console.log('👤 Mensagem no Privado');
-            
+
             // Vamos limpar o texto para facilitar as comparações
             const comando = texto.toLowerCase().trim();
 
             // A. LOGIN
-            if (comando === 'cadaallan') {
+            if (comando === SENHA_ADMIN) {
                 usuariosAutorizados.add(usuario);
                 await client.reply(usuario, '✅ Ativado. Modo administrador liberado.', msgId);
                 return;
@@ -512,13 +608,13 @@ async function start(client) {
 
             // ... Daqui para baixo só executa se estiver LOGADO ...
 
-            if (deveProcessarComoDatasheet(texto)) { 
-                await processarDatasheet(texto, usuario, grupo, isGroup, msgId); 
-                return; 
+            if (deveProcessarComoDatasheet(texto)) {
+                await processarDatasheet(texto, usuario, grupo, isGroup, msgId);
+                return;
             }
-            
+
             const contexto = gerenciadorContexto.getContexto(usuario);
-            
+
             if (deveProcessarComoEntidade(texto)) {
                 await processarEntidade(texto, usuario, grupo, isGroup, msgId);
                 return;
@@ -532,23 +628,32 @@ async function start(client) {
 // Funções Auxiliares
 function deveProcessarComoDatasheet(texto) { return validadorDatasheet.validarURLs(extratorDatasheet.analisarMensagem(texto)).aprovado; }
 function deveProcessarComoEntidade(texto) { return texto.toUpperCase().includes('FORNECEDOR') || texto.toUpperCase().includes('CLIENTE'); }
-async function reagir(msgId) { try { await clienteWpp.sendReactionToMessage(msgId, '⏳'); } catch(e) {} }
+// Substitua a sua função reagir atual por esta:
+async function reagir(msgId) {
+    if (!msgId) {
+        console.log('⚠️ [REAGIR] ID da mensagem não encontrado. Ignorando reação para evitar falha na biblioteca.');
+        return;
+    }
+    try {
+        await clienteWpp.sendReactionToMessage(msgId, '⏳');
+    } catch (e) {
+        console.error(`❌ [ERRO AO REAGIR] Falha no ID ${msgId}: ${e.message}`);
+    }
+}
 
-// ======================================================================
+
 // PROCESSADORES 
-// ======================================================================
-
 async function processarDatasheet(texto, u, g, isG, mId) {
     const validacao = validadorDatasheet.validarURLs(extratorDatasheet.analisarMensagem(texto));
     if (validacao.aprovado) {
         for (const urlInfo of validacao.urlsSuportadas) {
-            const id = `ds_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
+            const id = `ds_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
             await reagir(mId);
-            
+
             tarefasEmAndamento.set(id, { usuario: u, grupo: g, msgId: mId, isGroup: isG, tipo: 'datasheet' });
-            
+
             const res = await enviarParaGateway({ tipo: 'datasheet', url: urlInfo.url, custom_id: id });
-            
+
             if (res.sucesso && res.resultadoImediato) {
                 await clienteWpp.reply(isG ? g : u, "feito", mId);
                 tarefasEmAndamento.delete(id);
@@ -565,7 +670,7 @@ async function processarEntidade(texto, u, g, isG, mId) {
         await reagir(mId);
 
         tarefasEmAndamento.set(id, { usuario: u, grupo: g, msgId: mId, isGroup: isG, tipo: tipo });
-        
+
         const res = await enviarParaGateway({ ...ent, tipo: tipo, custom_id: id });
 
         if (res.sucesso && res.resultadoImediato) {
@@ -575,71 +680,131 @@ async function processarEntidade(texto, u, g, isG, mId) {
     }
 }
 
-// ======================================================================
-// PROCESSADOR DE PRODUTOS (PARALELO E AGRUPADO)
-// ======================================================================
-async function processarProdutos(texto, u, g, isG, mId, ctx) {
-    // 1. Extrai todos os produtos da mensagem
-    const prods = extrator.analisarMensagem(texto, ctx);
-    
-    if (!prods || prods.length === 0) return;
+// INTEGRAÇÃO COM IA (GROQ) - SUBSTITUTO DO EXTRATOR REGEX
+async function extrairProdutosComIA(textoWhatsApp) {
+    // A chave de API do Groq fica no .env (GROQ_API_KEY)
+    const API_KEY = GROQ_API_KEY;
+    const API_URL = GROQ_API_URL;
 
-    // Reage apenas uma vez no início para indicar processamento
+    const systemPrompt = `Você é um extrator de dados de produtos. Sua única função é analisar mensagens de texto bagunçadas e extrair DESCRIÇÃO, NCM e PREÇO de cada produto.
+    
+    REGRAS OBRIGATÓRIAS:
+    1. PRESERVE A DESCRIÇÃO ORIGINAL: Mantenha o nome completo do produto, incluindo obrigatoriamente marcas, códigos de modelo e referências alfanuméricas (ex: CP-1000, MS3033DSA, CAT6). NUNCA resuma ou corte partes do nome do produto. A descrição deve ficar em Português.
+    2. Remova da descrição APENAS as palavras NCM, CUSTO, PREÇO, R$ e os números que correspondem ao NCM e ao Preço.
+    3. NCM deve ter apenas números (preferencialmente 8 dígitos). Se a mensagem enviar apenas 1 NCM para vários produtos, repita esse NCM para todos eles.
+    4. Preço deve ser obrigatoriamente um número float usando ponto decimal (ex: 15.90, 1156.00, 2488.51).
+    5. NUNCA ESCREVA CÓDIGO (PYTHON, JAVASCRIPT, ETC). Você não é um programador. Não explique como fazer a extração. Apenas FAÇA a extração e retorne os dados.
+    6. Nunca remova unidades de medida da descrição (V, W, L, ml, kg, g, mm, hz, polegadas).
+    7. Se por acaso receber algo como um CNPJ e não tiver especificando se é cliente ou fornecedor, deve ignorar a mensagem. Exemplo: "17469701027709 nfe@arcelormittal.com.br".
+    8. Se receber algo que começa com https:// deve ignorar tambem. Exemplo: "https://tambasa.com/produto/garrafa...". Se receber um link, sempre ignore.
+    9. não crie valores ou informações!.
+    10. caso venha um preço assim : "  R$ 32.295,10" quero que tire o ponto e transforme a virgula em ponto : " R$ 32295.10 " mas e somente em casos especificos, como o exemplo dado.
+
+    FORMATO DE SAÍDA:
+    Retorne ESTRITAMENTE um array JSON válido, sem NENHUM texto antes ou depois, sem formatação markdown.
+    Exemplo:
+    [
+      { "descricao": "TELA DE PROJEÇÃO RETRATIL TRM200SA 2,00 X 2,00  TES", "ncm": "84313900", "preco": 2,99 }
+      { "descricao": "Switch 10/100 Mbit/S Ethernet 8 Portas RJ45 Scalance XB008 6GK50080BA101AB2 Siemens", "ncm": "84313900", "preco": 2,99 },
+      { "descricao": "CENTRAL AUTOMATIZADOR CP-1000", "ncm": "84313900", "preco": 126.00 }, 
+      { "descricao": "SPEAKERPHONE POLY SYNC 60 TEAMS PN: 77P41AA", "ncm": "90019090", "preco": 60,00 },
+      { "descricao": "FONTE POLY - POE++ 65W 2.5G CAT6A PN: B5NH6AA#AC4", "ncm": "85165000", "preco": 614.00 },
+      { "descricao": "Notebook Alienware 16 Aurora AC16250 Intel Core 5 210H Windows 11 Pro NVIDIAGeForce RTX 3050, GDDR6 de 6GB 16GB DDR5","ncm": "84713012", "preco": "7130,00"},
+      { "descricao": "Controle Jfl Tx 4R 4.0 Rolling Code 433,92MHz", "ncm": "85269200", "preco": 24,50 }
+      { "descricao": "201418-B LANTERNA DE LED 24V COM GRADE DE PROTEÇÃO", "ncm": "85122022", "preco": 1030,00 }
+      { "descricao": "SUPORTE ARTICULADO PARA MONITOR COM PISTÃO A GÁS FORTREK FK 421S 17-32", "ncm": "39269090", "preco": 155,87 }
+      { "descricao": " Refil Filtro Para Ap200, Fit200, Pa200, Ef 200, Bf200", "ncm": "84212100", "preco": 38,00 }
+    ]
+     `;
+
+    try {
+        console.log('🧠 [IA GROQ] A analisar texto recebido...');
+        const resposta = await axios.post(API_URL, {
+            model: GROQ_MODEL,
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: textoWhatsApp }
+            ],
+            temperature: 0.1
+        }, {
+            headers: {
+                'Authorization': `Bearer ${API_KEY}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const conteudoMisto = resposta.data.choices[0].message.content;
+
+        console.log('📦 [IA GROQ] Resposta Bruta:', conteudoMisto);
+
+        // ESCUDO NÍVEL 2: Procura estritamente por um Array que contém Objetos [ { ... } ]
+        const match = conteudoMisto.match(/\[\s*\{[\s\S]*\}\s*\]/);
+
+        if (!match) {
+            console.error('❌ [ERRO IA GROQ]: A IA não retornou um array JSON válido.');
+            return [];
+        }
+
+        const jsonExtraido = match[0];
+
+        try {
+            return JSON.parse(jsonExtraido);
+        } catch (parseError) {
+            console.error('❌ [ERRO JSON PARSE]: A IA gerou um JSON inválido.', parseError.message);
+            console.log('JSON com erro:', jsonExtraido);
+            return [];
+        }
+
+    } catch (error) {
+        console.error('❌ [ERRO IA GROQ]:', error.response ? JSON.stringify(error.response.data) : error.message);
+        return [];
+    }
+}
+
+// PROCESSADOR DE PRODUTOS (COM INTELIGÊNCIA ARTIFICIAL - GROQ)
+// PROCESSADOR DE PRODUTOS 
+async function processarProdutos(texto, u, g, isG, mId, ctx) {
     await reagir(mId);
 
-    const promessasDeEnvio = [];
-    const codigosParaResponder = [];
+    const prods = await extrairProdutosComIA(texto);
 
-    // 2. Prepara todas as requisições (sem esperar uma por uma)
-    for (const p of prods) {
-        // Atualização de contexto (mantida)
-        if (p.apenasPreco) ctx.completarUltimoProdutoPendenteComPreco(p.apenasPreco);
-
-        // Validação
-        if (validadorProduto.validarProduto(p).aprovado) {
-            const id = `prod_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
-            
-            // Registra a tarefa na memória
-            tarefasEmAndamento.set(id, { usuario: u, grupo: g, msgId: mId, isGroup: isG, tipo: 'produto' });
-
-            // 🔥 AQUI ESTÁ A MÁGICA: Não usamos 'await' direto no envio.
-            // Adicionamos a promessa no array para disparar tudo junto.
-            const promessa = enviarParaGateway({
-                tipo: 'produto',
-                custom_id: id,
-                descricao: p.descricao,
-                ncm: p.ncm,
-                preco: parseFloat(p.preco)
-            }).then(res => {
-                // Quando a requisição voltar, processamos o resultado individualmente aqui dentro
-                if (res.sucesso && res.resultadoImediato) {
-                    // Se deu certo e veio código, guarda na lista e remove da memória
-                    tarefasEmAndamento.delete(id);
-                    return res.resultadoImediato;
-                }
-                return null;
-            });
-
-            promessasDeEnvio.push(promessa);
-        }
+    if (!prods || prods.length === 0) {
+        console.log('⚠️ Nenhum produto encontrado pela IA.');
+        return;
     }
 
-    // 3. Aguarda TODOS os envios serem finalizados (Paralelismo)
-    // O Promise.all espera todos responderem, mas as requisições foram feitas quase simultaneamente.
-    const resultados = await Promise.all(promessasDeEnvio);
+    const produtosValidos = prods.filter(p => p.descricao && p.descricao.length >= 3 && p.ncm && p.preco && p.preco > 0);
 
-    // 4. Filtra apenas os códigos válidos que retornaram
-    const codigos = resultados.filter(codigo => codigo !== null);
+    if (produtosValidos.length === 0) {
+        console.log('⚠️ Produtos reprovados na validação (pode faltar NCM ou preço).');
+        return;
+    }
 
-    // 5. Envia UMA ÚNICA mensagem com todos os códigos
-    if (codigos.length > 0) {
-        // Formata a mensagem: um código por linha ou separado por espaço/vírgula
-        // Exemplo: 
-        // 12345
-        // 12346
-        const msgResposta = codigos.join('\n'); 
-        
-        await clienteWpp.reply(isG ? g : u, msgResposta, mId);
-        console.log(`✅ [LOTE] Respondido ${codigos.length} códigos em uma mensagem.`);
+    console.log(`🎯 [IA] Encontrou ${produtosValidos.length} produtos válidos. Iniciando envios...`);
+
+    // REGISTRA O LOTE PARA ESTA MENSAGEM
+    lotesEmAndamento.set(mId, {
+        totalEsperado: produtosValidos.length,
+        respostas: [] // Array que vai armazenar os códigos à medida que vão chegando
+    });
+
+    // Dispara as requisições para a API em paralelo (sem bloquear o código)
+    for (const p of produtosValidos) {
+        const id = `prod_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+
+        tarefasEmAndamento.set(id, { usuario: u, grupo: g, msgId: mId, isGroup: isG, tipo: 'produto' });
+
+        enviarParaGateway({
+            tipo: 'produto',
+            custom_id: id,
+            descricao: p.descricao,
+            ncm: p.ncm,
+            preco: parseFloat(p.preco)
+        }).then(res => {
+            // Se a API responder no exato segundo (via response síncrona do HTTP)
+            if (res.sucesso && res.resultadoImediato) {
+                processarRetornoItem(id, res.resultadoImediato);
+            }
+        });
     }
 }
