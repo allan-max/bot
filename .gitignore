@@ -1,9 +1,20 @@
+# Dependências
 node_modules/
+
+# Sessões e tokens do WhatsApp / Puppeteer
 tokens/
-*.log
 
-# Dados sensiveis
-.env
-
-# Versoes antigas locais (contem chaves antigas)
+# Pastas de arquivos antigos / legados / rascunhos
+coisas/
+versões/
+versoes/
 vers*/
+
+# Logs
+*.log
+sistema_node.log
+
+# Dados sensíveis e variáveis de ambiente
+.env
+.env.*
+!.env.example

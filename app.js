@@ -35,7 +35,8 @@ if (variaveisFaltando.length > 0) {
 
 // SISTEMA DE LOGS DEFINITIVO (CAPTURA 100% DO CMD)
 const PASTA_DO_LOG = process.env.PASTA_DO_LOG;
-const arquivoLog = path.join(PASTA_DO_LOG, 'log_zapzap.txt');
+const NOME_ARQUIVO_LOG = process.env.NOME_ARQUIVO_LOG || 'log_zapzap.txt';
+const arquivoLog = path.join(PASTA_DO_LOG, NOME_ARQUIVO_LOG);
 
 try {
     if (!fs.existsSync(PASTA_DO_LOG)) {
@@ -94,6 +95,7 @@ console.error = function (...args) {
 const PORTA_SERVIDOR = parseInt(process.env.PORTA_SERVIDOR, 10) || 5000;
 const API_GATEWAY = process.env.API_GATEWAY_URL;
 const MEU_IP_CALLBACK = process.env.CALLBACK_HOST;
+const ROTA_WEBHOOK = process.env.WEBHOOK_PATH || '/api/datasheet/webhook';
 
 const NOME_GRUPO_PERMITIDO = process.env.NOME_GRUPO_CADASTRO.toUpperCase().trim();
 const NOME_GRUPO_DATASHEET = process.env.NOME_GRUPO_DATASHEET.toUpperCase().trim();
@@ -103,6 +105,7 @@ const SENHA_ADMIN = process.env.SENHA_ADMIN.toLowerCase().trim();
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+const SESSION_NAME = process.env.SESSION_NAME || 'bot-servidor';
 
 // MEMÓRIA
 let tarefasEmAndamento = new Map();
@@ -224,7 +227,7 @@ const validadorDatasheet = new ValidadorDatasheet();
 // ENVIO PARA GATEWAY 
 async function enviarParaGateway(dadosOriginais) {
     const customId = dadosOriginais.custom_id || uuidv4();
-    const webhookUrl = `${MEU_IP_CALLBACK}:${PORTA_SERVIDOR}/api/datasheet/webhook`;
+    const webhookUrl = `${MEU_IP_CALLBACK}:${PORTA_SERVIDOR}${ROTA_WEBHOOK}`;
     const tipo = dadosOriginais.tipo ? dadosOriginais.tipo.toUpperCase() : 'TAREFA';
 
     let dadosPayload = {};
@@ -358,7 +361,7 @@ const app = express();
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
 
-app.post('/api/datasheet/webhook', async (req, res) => {
+app.post(ROTA_WEBHOOK, async (req, res) => {
     try {
         const body = req.body || {};
         const idInterno = body.codigoTarefa || body.request_id || body.custom_id || body.id_interno;
@@ -398,7 +401,7 @@ app.listen(PORTA_SERVIDOR, () => console.log(`🚀 Webhook na porta ${PORTA_SERV
 
 // BOT WHATSAPP
 wppconnect.create({
-    session: 'bot-servidor',
+    session: SESSION_NAME,
     // CAMINHO DO CHROME (definido no .env)
     executablePath: process.env.CHROME_PATH,
     headless: 'new',
