@@ -107,6 +107,13 @@ const GROQ_API_URL = process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1
 const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 const SESSION_NAME = process.env.SESSION_NAME || 'bot-servidor';
 
+// Claude (Anthropic) - consulta de NCM pela descricao. Opcional: sem chave, fica desligado.
+const ANTHROPIC_API_KEY = (process.env.ANTHROPIC_API_KEY || '').trim();
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-5-5';
+const AnthropicSDK = require('@anthropic-ai/sdk');
+const Anthropic = AnthropicSDK.default || AnthropicSDK;
+const clienteClaude = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
+
 // MEMÓRIA
 let tarefasEmAndamento = new Map();
 let lotesEmAndamento = new Map();
@@ -764,17 +771,103 @@ async function extrairProdutosComIA(textoWhatsApp) {
     }
 }
 
+// =========================================================================
+// CONSULTA DE NCM PELO CLAUDE (ANTHROPIC)
+// Recebe a lista de produtos e preenche o NCM dos que vieram sem NCM valido.
+// Os que ja tem NCM de 8 digitos ficam como estao.
+// =========================================================================
+function ncmValido(ncm) {
+    return /^\d{8}$/.test(String(ncm || '').replace(/\D/g, ''));
+}
+
+async function preencherNcmComClaude(produtos) {
+    const semNcm = produtos
+        .map((p, indice) => ({ indice, descricao: p.descricao }))
+        .filter(item => item.descricao && !ncmValido(produtos[item.indice].ncm));
+
+    if (semNcm.length === 0) return produtos;
+
+    if (!clienteClaude) {
+        console.log('⚠️ [CLAUDE NCM] ANTHROPIC_API_KEY vazia no .env - consulta de NCM desligada.');
+        return produtos;
+    }
+
+    const listaTexto = semNcm.map(item => `${item.indice}: ${item.descricao}`).join('\n');
+
+    try {
+        console.log(`🧠 [CLAUDE NCM] Consultando NCM de ${semNcm.length} produto(s)...`);
+        const resposta = await clienteClaude.beta.messages.create({
+            model: CLAUDE_MODEL,
+            max_tokens: 16000,
+            betas: ['server-side-fallback-2026-07-01'],
+            fallbacks: 'default',
+            output_config: {
+                effort: 'medium',
+                format: {
+                    type: 'json_schema',
+                    schema: {
+                        type: 'object',
+                        properties: {
+                            itens: {
+                                type: 'array',
+                                items: {
+                                    type: 'object',
+                                    properties: {
+                                        indice: { type: 'integer' },
+                                        ncm: { type: 'string', description: 'NCM com exatamente 8 digitos, so numeros' }
+                                    },
+                                    required: ['indice', 'ncm'],
+                                    additionalProperties: false
+                                }
+                            }
+                        },
+                        required: ['itens'],
+                        additionalProperties: false
+                    }
+                }
+            },
+            system: 'Voce e especialista em classificacao fiscal brasileira (NCM / TIPI). ' +
+                'Para cada produto recebido, informe o codigo NCM de 8 digitos mais adequado para a descricao. ' +
+                'Responda um item para cada indice recebido, mantendo o mesmo indice.',
+            messages: [{ role: 'user', content: `Produtos (indice: descricao):\n${listaTexto}` }]
+        });
+
+        if (resposta.stop_reason === 'refusal') {
+            console.error('❌ [CLAUDE NCM] O Claude recusou a consulta.');
+            return produtos;
+        }
+
+        const blocoTexto = resposta.content.find(b => b.type === 'text');
+        const dados = JSON.parse(blocoTexto ? blocoTexto.text : '{}');
+
+        for (const item of dados.itens || []) {
+            const ncm = String(item.ncm || '').replace(/\D/g, '');
+            if (produtos[item.indice] && ncmValido(ncm) && !ncmValido(produtos[item.indice].ncm)) {
+                produtos[item.indice].ncm = ncm;
+                console.log(`📌 [CLAUDE NCM] "${produtos[item.indice].descricao}" -> ${ncm}`);
+            }
+        }
+    } catch (error) {
+        console.error('❌ [ERRO CLAUDE NCM]:', error.status ? `${error.status} ${error.message}` : error.message);
+    }
+
+    return produtos;
+}
+
 // PROCESSADOR DE PRODUTOS (COM INTELIGÊNCIA ARTIFICIAL - GROQ)
-// PROCESSADOR DE PRODUTOS 
+// PROCESSADOR DE PRODUTOS
 async function processarProdutos(texto, u, g, isG, mId, ctx) {
     await reagir(mId);
 
-    const prods = await extrairProdutosComIA(texto);
+    let prods = await extrairProdutosComIA(texto);
 
     if (!prods || prods.length === 0) {
         console.log('⚠️ Nenhum produto encontrado pela IA.');
         return;
     }
+
+    // Produtos sem NCM: o Claude descobre o NCM pela descricao
+    prods = await preencherNcmComClaude(prods);
 
     const produtosValidos = prods.filter(p => p.descricao && p.descricao.length >= 3 && p.ncm && p.preco && p.preco > 0);
 
